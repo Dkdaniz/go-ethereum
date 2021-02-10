@@ -544,6 +544,11 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	if !local && tx.GasPriceIntCmp(pool.gasPrice) < 0 {
 		return ErrUnderpriced
 	}
+
+	// Drop non-local transactions under our own minimal accepted gas price
+	if tx.GasPriceIntCmp(pool.gasPrice) < 1 {
+		return ErrUnderpriced
+	}
 	// Ensure the transaction adheres to nonce ordering
 	if pool.currentState.GetNonce(from) > tx.Nonce() {
 		return ErrNonceTooLow
@@ -561,6 +566,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	if tx.Gas() < intrGas {
 		return ErrIntrinsicGas
 	}
+
 	return nil
 }
 
@@ -574,6 +580,9 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err error) {
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
+	if tx.GasPrice() != big.NewInt(0) {
+
+	}
 	if pool.all.Get(hash) != nil {
 		log.Trace("Discarding already known transaction", "hash", hash)
 		knownTxMeter.Mark(1)
@@ -801,23 +810,25 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local, sync bool) []error {
 		news = make([]*types.Transaction, 0, len(txs))
 	)
 	for i, tx := range txs {
-		// If the transaction is known, pre-set the error slot
-		if pool.all.Get(tx.Hash()) != nil {
-			errs[i] = ErrAlreadyKnown
-			knownTxMeter.Mark(1)
-			continue
+		if tx.GasPrice() != big.NewInt(0) {
+			// If the transaction is known, pre-set the error slot
+			if pool.all.Get(tx.Hash()) != nil {
+				errs[i] = ErrAlreadyKnown
+				knownTxMeter.Mark(1)
+				continue
+			}
+			// Exclude transactions with invalid signatures as soon as
+			// possible and cache senders in transactions before
+			// obtaining lock
+			_, err := types.Sender(pool.signer, tx)
+			if err != nil {
+				errs[i] = ErrInvalidSender
+				invalidTxMeter.Mark(1)
+				continue
+			}
+			// Accumulate all unknown transactions for deeper processing
+			news = append(news, tx)
 		}
-		// Exclude transactions with invalid signatures as soon as
-		// possible and cache senders in transactions before
-		// obtaining lock
-		_, err := types.Sender(pool.signer, tx)
-		if err != nil {
-			errs[i] = ErrInvalidSender
-			invalidTxMeter.Mark(1)
-			continue
-		}
-		// Accumulate all unknown transactions for deeper processing
-		news = append(news, tx)
 	}
 	if len(news) == 0 {
 		return errs
